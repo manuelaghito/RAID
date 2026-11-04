@@ -1,4 +1,4 @@
-## evaluate a trained run on the test split: model vs bicubic baseline (input channel 0), in degC.
+## evaluate a trained run on the test split: model vs bicubic baseline (input channel 0), in physical units.
 ## inputs are normalised with the run's own training stats (norm_stats.npz), as in training.
 ## python3 scripts/evaluate.py --config configs/step1a_cnn.yaml --run_dir experiments/step1a_cnn/val2025
 
@@ -34,7 +34,7 @@ from raid.config import apply_fold, dict_to_namespace, var_dir
 from raid.data.dataset import DownscalingDataset, denormalize
 from raid.data.file_utils import daily_filename
 from raid.log import tee_output
-from raid.metrics import masked_bias, masked_rmse
+from raid.metrics import UNITS, masked_bias, masked_rmse
 from raid.models import build_model
 
 
@@ -126,7 +126,7 @@ def main():
     ## dataset's tensors into shared memory, which would leave a .numpy() view pointing at freed memory
     sea = ds.sea_mask.numpy().copy()
     T, (H, W) = len(ds), sea.shape
-    ## (T, H, W) degC, land = NaN; written day by day so the whole array never sits in RAM
+    ## (T, H, W) physical units, land = NaN; written day by day so the whole array never sits in RAM
     pred_all = np.lib.format.open_memmap(out / f"pred_{var}.npy", mode="w+", dtype=np.float32, shape=(T, H, W))
     ## per day: rmse_model, rmse_baseline, bias_model, bias_baseline (bias = pred - target)
     daily = np.zeros((T, 4), np.float32)
@@ -134,10 +134,10 @@ def main():
 
     with torch.no_grad():
         for i, batches in enumerate(zip(*loaders)):
-            ## ensemble = mean of the members' predictions in degC (a single run is a 1-member ensemble)
+            ## ensemble = mean of the members' predictions in physical units (a single run is a 1-member ensemble)
             p = np.mean([denormalize(model(x.to(device))[0, 0].cpu().numpy(), *st[var])
                          for (model, _, st), (x, _, _) in zip(members, batches)], axis=0)
-            ## target and bicubic baseline straight from the degC files, not via the normalised x/y:
+            ## target and bicubic baseline straight from the physical-unit files, not via the normalised x/y:
             ## the dataset fills NaN with 0 after normalising, which would turn them into the fold's mean
             date = ds.dates[i]
             t = np.load(ds.dir_160m / daily_filename(var, date))
@@ -164,8 +164,9 @@ def main():
     rmse_m, rmse_b = np.sqrt((daily[:, :2] ** 2).mean(0))
     print(f"{args.split}{f' (fold {args.fold})' if args.fold else ''}: {T} days ({ds.dates[0]} -> {ds.dates[-1]}), "
           f"run{'s' if ensemble else ''} {', '.join(map(str, run_dirs))}")
-    print(f"  model    RMSE {rmse_m:.4f} degC  bias {daily[:, 2].mean():+.4f}")
-    print(f"  baseline RMSE {rmse_b:.4f} degC  bias {daily[:, 3].mean():+.4f}")
+    unit = UNITS.get(var, "")
+    print(f"  model    RMSE {rmse_m:.4f} {unit}  bias {daily[:, 2].mean():+.4f}")
+    print(f"  baseline RMSE {rmse_b:.4f} {unit}  bias {daily[:, 3].mean():+.4f}")
     print(f"  skill vs baseline: {1 - rmse_m / rmse_b:+.1%}")
 
     monthly = monthly_metrics(ds.dates, daily)
