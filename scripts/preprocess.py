@@ -24,6 +24,15 @@ from raid.data.file_utils import list_files, get_paired_dates, _extract_date, da
 ## each run appends the command, git commit and settings to <processed_dir>/preprocess_provenance.txt
 
 
+def save_atomic(path, arr):
+    ## write to a temp file and rename, so an interrupted run never leaves a truncated .npy that a
+    ## restart (which skips existing files) would take as done
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        np.save(f, arr)
+    tmp.replace(path)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
@@ -86,11 +95,11 @@ def main():
 
         for name in todo_in:
             arr = reproject_800m_to_160m(ds_800m, ds_160m, name, levels.get(name, -1), method=args.method)
-            np.save(out_800m / daily_filename(name, date), arr)
+            save_atomic(out_800m / daily_filename(name, date), arr)
 
         for name in todo_tgt:
             arr = extract_variable(ds_160m, "160m", name, levels.get(name, -1))
-            np.save(out_160m / daily_filename(name, date), arr.values.astype(np.float32))
+            save_atomic(out_160m / daily_filename(name, date), arr.values.astype(np.float32))
     
     
     out_static = root / "static"
