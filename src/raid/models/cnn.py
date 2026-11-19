@@ -24,11 +24,12 @@ class ResBlock(nn.Module):
 
 
 class SimpleSRCNN(nn.Module):
-    def __init__(self, in_channels: int = 3, hidden_dim: int = 64, n_blocks: int = 4):
+    def __init__(self, in_channels: int = 3, hidden_dim: int = 64, n_blocks: int = 4, out_channels: int = 1):
         super().__init__()
+        self.out_channels = out_channels
         self.input_conv = nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1)
         self.res_blocks = nn.Sequential(*[ResBlock(hidden_dim) for _ in range(n_blocks)])
-        self.output_conv = nn.Conv2d(hidden_dim, 1, kernel_size=3, padding=1)
+        self.output_conv = nn.Conv2d(hidden_dim, out_channels, kernel_size=3, padding=1)
 
         # Start exactly at the bicubic baseline: the correction is zero at init.
         nn.init.zeros_(self.output_conv.weight)
@@ -37,7 +38,7 @@ class SimpleSRCNN(nn.Module):
     def forward(self, x):
         feat = self.input_conv(x)
         feat = self.res_blocks(feat)
-        return x[:, :1] + self.output_conv(feat)
+        return x[:, :self.out_channels] + self.output_conv(feat)
 
 
     

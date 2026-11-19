@@ -40,12 +40,17 @@ def collect(root, only_eval=None):
     rows = []
     for f in sorted(root.rglob("daily_metrics.npy")):
         eval_dir = f.parent
+        ## a run with several target variables has one subfolder per variable: eval_test/<var>/
+        var = None
+        if not eval_dir.name.startswith("eval_"):
+            var, eval_dir = eval_dir.name, eval_dir.parent
         model_dir = eval_dir.parent
         if only_eval and eval_dir.name != only_eval:
             continue
         ## run = path between root and the model folder, e.g. edge0_seed0/temp (or "." for a single run)
-        rows.append(dict(run=str(model_dir.parent.relative_to(root)), model=model_dir.name, eval=eval_dir.name,
-                         **read_settings(model_dir), **read_eval(eval_dir)))
+        run = str(model_dir.parent.relative_to(root)) + (f" [{var}]" if var else "")
+        rows.append(dict(run=run, model=model_dir.name, eval=eval_dir.name,
+                         **read_settings(model_dir), **read_eval(f.parent)))
     return rows
 
 
