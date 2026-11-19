@@ -16,6 +16,10 @@
 #python3 scripts/evaluate.py --config configs/step1b_unet.yaml --fold ensemble
 ## --output_dir overrides output_dir from the config (same as train.py), e.g. for runs kept elsewhere:
 #python3 scripts/evaluate.py --config configs/step1b_unet.yaml --fold ensemble --output_dir /some/where/unet_try2
+## --edge_pixels N scores only the interior: N cells along every grid edge are left out of all metrics and maps
+## (as train.edge_pixels does for the loss), so edge 0/5/10 runs can be compared on the same cells.
+## results go to eval_<split>_trim<N> next to the normal eval_<split>:
+#python3 scripts/evaluate.py --config configs/step1b_unet.yaml --fold ensemble --edge_pixels 10
 
 #CUDA_VISIBLE_DEVICES=1 python3 scripts/evaluate.py --config configs/step1b_unet.yaml 
 #      --run_dir /data/prosjekt/15915_RAID/train/step1B/temp/val2025  
@@ -31,7 +35,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from raid.config import apply_fold, dict_to_namespace, var_dir
-from raid.data.dataset import DownscalingDataset, denormalize
+from raid.data.dataset import DownscalingDataset, denormalize, trim_edges
 from raid.data.file_utils import daily_filename
 from raid.log import tee_output
 from raid.metrics import UNITS, masked_bias, masked_rmse
@@ -87,7 +91,11 @@ def main():
     parser.add_argument("--fold", type=str, default=None,
                         help="CV fold name from split.folds (run dir <output_dir>/<var>/<fold>, val = the fold's val "
                              "years), or 'ensemble' to average all fold models (test split only)")
+    parser.add_argument("--edge_pixels", type=int, default=0,
+                        help="leave N cells along every grid edge out of the metrics (default 0: all sea cells); "
+                             "results go to eval_<split>_trim<N>")
     args = parser.parse_args()
+    suffix = f"_trim{args.edge_pixels}" if args.edge_pixels > 0 else ""
 
     with open(args.config) as f:
         raw = yaml.safe_load(f)
@@ -101,7 +109,7 @@ def main():
         if args.run_dir is not None:
             parser.error("--fold ensemble reads <output_dir>/<var>/<fold> for every fold; --run_dir is not used")
         run_dirs = [Path(var_dir(raw)) / name for name in raw["split"]["folds"]]
-        out = Path(var_dir(raw)) / "ensemble" / f"eval_{args.split}"
+        out = Path(var_dir(raw)) / "ensemble" / f"eval_{args.split}{suffix}"
     else:
         if args.fold is not None:
             apply_fold(raw, args.fold)
@@ -110,7 +118,7 @@ def main():
         if not raw["split"].get(args.split, {}).get("years"):
             parser.error(f"no {args.split} years for fold {args.fold}")
         run_dirs = [Path(args.run_dir or raw["output_dir"])]
-        out = run_dirs[0] / f"eval_{args.split}"
+        out = run_dirs[0] / f"eval_{args.split}{suffix}"
     cfg = dict_to_namespace(raw)
     out.mkdir(parents=True, exist_ok=True)
     tee_output(out / "evaluate.log")
@@ -126,6 +134,8 @@ def main():
     ## dataset's tensors into shared memory, which would leave a .numpy() view pointing at freed memory
     sea = ds.sea_mask.numpy().copy()
     T, (H, W) = len(ds), sea.shape
+    ## cells that are scored: all sea cells, or the interior with --edge_pixels
+    scored = trim_edges(sea, args.edge_pixels)
     ## (T, H, W) physical units, land = NaN; written day by day so the whole array never sits in RAM
     pred_all = np.lib.format.open_memmap(out / f"pred_{var}.npy", mode="w+", dtype=np.float32, shape=(T, H, W))
     ## per day: rmse_model, rmse_baseline, bias_model, bias_baseline (bias = pred - target)
@@ -146,14 +156,14 @@ def main():
             if n_t or n_b:
                 raise ValueError(f"{date}: NaN on sea cells, target {n_t}, baseline input {n_b}")
             pred_all[i] = np.where(sea, p, np.nan)
-            daily[i] = (masked_rmse(p, t, sea), masked_rmse(b, t, sea),
-                        masked_bias(p, t, sea), masked_bias(b, t, sea))
+            daily[i] = (masked_rmse(p, t, scored), masked_rmse(b, t, scored),
+                        masked_bias(p, t, scored), masked_bias(b, t, scored))
             sq_model += (p - t) ** 2
             sq_base += (b - t) ** 2
             bias_sum += p - t
     pred_all.flush()
 
-    land = lambda a: np.where(sea, a, np.nan).astype(np.float32)
+    land = lambda a: np.where(scored, a, np.nan).astype(np.float32)
     np.save(out / "dates.npy", np.array(ds.dates))                       # (T,) 'YYYYMMDD'
     np.save(out / "daily_metrics.npy", daily)                            # (T, 4), columns above
     np.save(out / f"rmse_map_model_{var}.npy", land(np.sqrt(sq_model / T)))
@@ -164,6 +174,8 @@ def main():
     rmse_m, rmse_b = np.sqrt((daily[:, :2] ** 2).mean(0))
     print(f"{args.split}{f' (fold {args.fold})' if args.fold else ''}: {T} days ({ds.dates[0]} -> {ds.dates[-1]}), "
           f"run{'s' if ensemble else ''} {', '.join(map(str, run_dirs))}")
+    if args.edge_pixels > 0:
+        print(f"  interior only: {args.edge_pixels} edge cells left out, {scored.sum()} of {sea.sum()} sea cells scored")
     unit = UNITS.get(var, "")
     print(f"  model    RMSE {rmse_m:.4f} {unit}  bias {daily[:, 2].mean():+.4f}")
     print(f"  baseline RMSE {rmse_b:.4f} {unit}  bias {daily[:, 3].mean():+.4f}")
