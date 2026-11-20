@@ -20,6 +20,10 @@
 ## (as train.edge_pixels does for the loss), so edge 0/5/10 runs can be compared on the same cells.
 ## results go to eval_<split>_trim<N> next to the normal eval_<split>:
 #python3 scripts/evaluate.py --config configs/step1b_unet.yaml --fold ensemble --edge_pixels 10
+## data.processed_dir may list several regions (multi-region training); evaluation uses the first one.
+## --processed_dir scores another region with the same models, results go to eval_<split>_<region folder name>,
+## e.g. an A04 model on A03 -> eval_test_processed_A03:
+#python3 scripts/evaluate.py --config configs/step1b_unet.yaml --fold ensemble --processed_dir /data/prosjekt/15915_RAID/data/processed_A03
 
 #CUDA_VISIBLE_DEVICES=1 python3 scripts/evaluate.py --config configs/step1b_unet.yaml 
 #      --run_dir /data/prosjekt/15915_RAID/train/step1B/temp/val2025  
@@ -35,7 +39,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from raid.config import apply_fold, dict_to_namespace, var_dir
-from raid.data.dataset import DownscalingDataset, denormalize, trim_edges
+from raid.data.dataset import DownscalingDataset, compute_static_stats, denormalize, processed_dirs, trim_edges
 from raid.data.file_utils import daily_filename
 from raid.log import tee_output
 from raid.metrics import UNITS, masked_bias, masked_rmse
@@ -48,13 +52,25 @@ def load_stats(path, names):
     return {v: (float(s[f"{v}_mean"]), float(s[f"{v}_std"])) for v in names}
 
 
-def load_members(cfg, run_dirs, years, device):
-    ## one (model, dataset, stats) per run: each model sees inputs normalised with its own training stats
+def load_static_stats(path, names):
+    ## pooled static-field stats saved by a multi-region run; None if the run has none (single region)
+    s = np.load(path)
+    names = [n for n in names if n != "land_mask"]
+    if not all(f"static_{n}_mean" in s for n in names):
+        return None
+    return {n: (float(s[f"static_{n}_mean"]), float(s[f"static_{n}_std"])) for n in names}
+
+
+def load_members(cfg, run_dirs, years, device, fallback_static=None):
+    ## one (model, dataset, stats) per run: each model sees inputs normalised with its own training stats.
+    ## static fields: the run's pooled stats if saved (multi-region), else fallback_static (the training
+    ## region's own stats, when scoring another region), else this region's own (= as in training)
     names = dict.fromkeys(cfg.data.input_vars + cfg.data.target_vars)
     members = []
     for run in run_dirs:
         stats = load_stats(run / "norm_stats.npz", names)
-        ds = DownscalingDataset(cfg, years=years, stats=stats)
+        static_stats = load_static_stats(run / "norm_stats.npz", cfg.data.static_inputs) or fallback_static
+        ds = DownscalingDataset(cfg, years=years, stats=stats, static_stats=static_stats)
         model = build_model(cfg).to(device)
         model.load_state_dict(torch.load(run / "best.pt", map_location=device))
         model.eval()
@@ -94,6 +110,9 @@ def main():
     parser.add_argument("--edge_pixels", type=int, default=0,
                         help="leave N cells along every grid edge out of the metrics (default 0: all sea cells); "
                              "results go to eval_<split>_trim<N>")
+    parser.add_argument("--processed_dir", type=str, default=None,
+                        help="score this region's preprocessed data instead of the first data.processed_dir; "
+                             "results go to eval_<split>[_trim<N>]_<folder name>")
     args = parser.parse_args()
     suffix = f"_trim{args.edge_pixels}" if args.edge_pixels > 0 else ""
 
@@ -101,6 +120,15 @@ def main():
         raw = yaml.safe_load(f)
     if args.output_dir is not None:
         raw["output_dir"] = args.output_dir
+    fallback_static = None
+    if args.processed_dir is not None:
+        train_roots = processed_dirs(dict_to_namespace(raw))
+        eval_root = Path(args.processed_dir)
+        suffix += f"_{eval_root.name}"
+        raw["data"]["processed_dir"] = str(eval_root)
+        ## a single-region run standardised its static fields over its own region's sea cells
+        if len(train_roots) == 1 and eval_root.resolve() != train_roots[0].resolve():
+            fallback_static = compute_static_stats(train_roots, raw["data"]["static_inputs"])
     ensemble = args.fold == "ensemble"
     if ensemble:
         ## each fold model was trained on the other folds' val years, so only the test split is unseen by all
@@ -124,7 +152,7 @@ def main():
     tee_output(out / "evaluate.log")
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    members = load_members(cfg, run_dirs, getattr(cfg.split, args.split).years, device)
+    members = load_members(cfg, run_dirs, getattr(cfg.split, args.split).years, device, fallback_static)
     loaders = [DataLoader(ds, batch_size=1, shuffle=False, num_workers=cfg.train.num_workers)
                for _, ds, _ in members]
     ds = members[0][1]     # dates, sea mask and file dirs are the same for every member
@@ -175,6 +203,7 @@ def main():
     land = lambda arr: np.where(scored, arr, np.nan).astype(np.float32)
     print(f"{args.split}{f' (fold {args.fold})' if args.fold else ''}: {T} days ({ds.dates[0]} -> {ds.dates[-1]}), "
           f"run{'s' if ensemble else ''} {', '.join(map(str, run_dirs))}")
+    print(f"  data {ds.root}")
     if args.edge_pixels > 0:
         print(f"  interior only: {args.edge_pixels} edge cells left out, {scored.sum()} of {sea.sum()} sea cells scored")
     for v, d in dests.items():

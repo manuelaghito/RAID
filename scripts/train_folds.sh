@@ -5,6 +5,7 @@
 ## extra arguments are passed to every train.py run, e.g. --output_dir or --epochs:
 ## CUDA_VISIBLE_DEVICES=1 bash scripts/train_folds.sh configs/step1b_unet.yaml
 ## CUDA_VISIBLE_DEVICES=1 bash scripts/train_folds.sh configs/step1b_unet.yaml --output_dir /some/where
+## FOLDS picks the folds, e.g. without the full model: FOLDS="val2024 val2025" bash scripts/train_folds.sh ...
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
@@ -14,7 +15,9 @@ fi
 config=$1
 shift
 
-for fold in val2024 val2025 full; do
+FOLDS=${FOLDS:-"val2024 val2025 full"}
+
+for fold in $FOLDS; do
     echo "=== fold $fold ==="
     python3 "$(dirname "$0")/train.py" --config "$config" --fold "$fold" "$@"
 done

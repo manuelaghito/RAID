@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import ConcatDataset, Dataset, DataLoader
 
 from .file_utils import daily_filename
 
@@ -31,17 +31,52 @@ def trim_edges(mask, n):
     return mask
 
 
+def processed_dirs(cfg):
+    """data.processed_dir as a list of Paths: one folder per region (a plain string = one region).
+
+    The first region is the home region: validation (which picks best.pt) and, by default, evaluation use it.
+    """
+    d = cfg.data.processed_dir
+    return [Path(x) for x in ([d] if isinstance(d, (str, Path)) else d)]
+
+
 def build_dataloaders(cfg):
     ## normalisation stats come from this fold's training years only; val reuses them
     ## no val years (--fold full) -> val_loader is None
     ## train.edge_pixels (default 0) drops that many cells along each grid edge from the TRAINING loss.
     ## train.val_edge_pixels (default 0) does the same for the VALIDATION loss, which picks best.pt;
     ## kept separate so runs with different edge_pixels still choose their checkpoint on the same cells
+    ## several regions (data.processed_dir a list): training draws from all of them, with the same years in
+    ## every region, and one set of stats pooled over all their training sea cells (variables and static
+    ## fields alike, so e.g. a depth means the same input everywhere); validation uses the first region only
     edge_pixels = getattr(cfg.train, "edge_pixels", 0)
     val_edge_pixels = getattr(cfg.train, "val_edge_pixels", 0)
-    train_dataset = DownscalingDataset(cfg=cfg, years=cfg.split.train.years,
-                                       patch_size=getattr(cfg.train, "patch_size", None),
-                                       edge_pixels=edge_pixels)
+    patch_size = getattr(cfg.train, "patch_size", None)
+    ## random crops drawn per day and epoch (per region): an epoch is days x crops_per_day samples
+    crops_per_day = getattr(cfg.train, "crops_per_day", 20)
+    roots = processed_dirs(cfg)
+    if len(roots) == 1:
+        train_dataset = DownscalingDataset(cfg=cfg, years=cfg.split.train.years, patch_size=patch_size,
+                                           crops_per_day=crops_per_day, edge_pixels=edge_pixels)
+        stats, static_stats = train_dataset.stats, None
+    else:
+        iv, tv = cfg.data.input_vars, cfg.data.target_vars
+        regions = []
+        for root in roots:
+            dates = find_dates(root / "800m_on_160m_grid", root / "160m", iv, tv, cfg.split.train.years)
+            if not dates:
+                raise RuntimeError(f"no preprocessed samples in {root} for years {cfg.split.train.years}")
+            sea = torch.from_numpy(np.load(root / "static" / "land_mask.npy").astype(bool))
+            regions.append((dates, root / "800m_on_160m_grid", root / "160m", sea))
+        stats = compute_stats_pooled(regions, iv, tv)
+        static_stats = compute_static_stats(roots, cfg.data.static_inputs)
+        parts = [DownscalingDataset(cfg=cfg, years=cfg.split.train.years, patch_size=patch_size,
+                                    crops_per_day=crops_per_day, stats=stats,
+                                    edge_pixels=edge_pixels, root=root, static_stats=static_stats)
+                 for root in roots]
+        train_dataset = ConcatDataset(parts)
+        print("regions (train): " + ", ".join(f"{r} {len(p.dates)} days" for r, p in zip(roots, parts))
+              + f"; val on {roots[0]}")
 
     ## train.seed fixes the shuffle order and, through the per-worker seeds drawn from this
     ## generator, the random crops; None leaves both random
@@ -49,17 +84,21 @@ def build_dataloaders(cfg):
     generator = torch.Generator().manual_seed(seed) if seed is not None else None
 
     out = Path(cfg.output_dir); out.mkdir(parents=True, exist_ok=True)
+    ## static_<name>_mean/std only for several regions; a single-region run standardises its static fields
+    ## over its own sea cells, as before
     np.savez(out / "norm_stats.npz",
-             **{f"{v}_mean": m for v, (m, s) in train_dataset.stats.items()},
-             **{f"{v}_std":  s for v, (m, s) in train_dataset.stats.items()})
+             **{f"{v}_mean": m for v, (m, s) in stats.items()},
+             **{f"{v}_std":  s for v, (m, s) in stats.items()},
+             **{f"static_{n}_mean": m for n, (m, s) in (static_stats or {}).items()},
+             **{f"static_{n}_std":  s for n, (m, s) in (static_stats or {}).items()})
 
     train_loader = DataLoader(train_dataset, batch_size=cfg.train.batch_size, shuffle=True,
                               num_workers=cfg.train.num_workers, pin_memory=True, generator=generator)
     if not cfg.split.val.years:
         return train_loader, None
     ## validate on the full grid (deterministic, comparable across epochs); full grids only fit batch 1
-    val_dataset = DownscalingDataset(cfg=cfg, years=cfg.split.val.years, stats=train_dataset.stats,
-                                     edge_pixels=val_edge_pixels)
+    val_dataset = DownscalingDataset(cfg=cfg, years=cfg.split.val.years, stats=stats,
+                                     edge_pixels=val_edge_pixels, root=roots[0], static_stats=static_stats)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False,
                             num_workers=cfg.train.num_workers, pin_memory=True)
 
@@ -68,18 +107,64 @@ def build_dataloaders(cfg):
 
 def compute_stats(dates, dir_800m, dir_160m, input_vars, target_vars, sea_mask):
     """Mean/std per variable over sea cells of the given (training) dates."""
-    sea = sea_mask.numpy()
+    return compute_stats_pooled([(dates, dir_800m, dir_160m, sea_mask)], input_vars, target_vars)
+
+
+def compute_stats_pooled(regions, input_vars, target_vars):
+    """Mean/std per variable over the sea cells of all regions' (training) dates, pooled cell by cell.
+
+    regions: list of (dates, dir_800m, dir_160m, sea_mask); one region gives exactly compute_stats.
+    """
     stats = {}
     for v in dict.fromkeys(input_vars + target_vars):          # unique, ordered
-        d = dir_160m if v in target_vars else dir_800m
         n, s, ss = 0, 0.0, 0.0
-        for date in dates:
-            a = np.load(d / daily_filename(v, date))[sea].astype(np.float64)
-            a = a[np.isfinite(a)]
-            n += a.size; s += a.sum(); ss += (a * a).sum()
+        for dates, dir_800m, dir_160m, sea_mask in regions:
+            sea = sea_mask.numpy()
+            d = dir_160m if v in target_vars else dir_800m
+            for date in dates:
+                a = np.load(d / daily_filename(v, date))[sea].astype(np.float64)
+                a = a[np.isfinite(a)]
+                n += a.size; s += a.sum(); ss += (a * a).sum()
         mean = s / n
         stats[v] = (mean, float(np.sqrt(ss / n - mean ** 2)))
     return stats
+
+
+def _static_raw(static_dir, name):
+    arr = np.load(static_dir / f"{name}.npy").astype(np.float32)
+    ## distance_to_coast is log1p'd first: the error changes over the first few km, but
+    ## distances reach ~100 km, so plain standardising would squash the coastal range
+    return np.log1p(arr) if name == "distance_to_coast" else arr
+
+
+def compute_static_stats(roots, names):
+    """Mean/std of each static field (except land_mask) over the sea cells of all regions together."""
+    out = {}
+    for name in names:
+        if name == "land_mask":
+            continue
+        vals = []
+        for root in roots:
+            sea = np.load(root / "static" / "land_mask.npy").astype(bool)
+            vals.append(_static_raw(root / "static", name)[sea].astype(np.float64))
+        a = np.concatenate(vals)
+        out[name] = (float(a.mean()), float(a.std()))
+    return out
+
+
+def find_dates(dir_800m, dir_160m, input_vars, target_vars, years):
+    ## dates of the given years for which every input and target file exists
+    years = {str(y) for y in years}
+    dates = []
+    for path in sorted(dir_800m.glob(daily_filename(input_vars[0], "[0-9]" * 8))):
+        date = path.name[:8]
+        if date[:4] not in years:
+            continue
+        if all((dir_800m / daily_filename(v, date)).exists() for v in input_vars) and all(
+            (dir_160m / daily_filename(v, date)).exists() for v in target_vars
+        ):
+            dates.append(date)
+    return dates
 
 
 class DownscalingDataset(Dataset):
@@ -90,10 +175,14 @@ class DownscalingDataset(Dataset):
     mask: (1, H, W)                                  1 = sea, 0 = land, for masked_mse
     Land cells are set to 0 in x and y. edge_pixels > 0 also sets a frame of that many cells
     along each grid edge to 0 in mask (inputs keep them); sea_mask itself is not trimmed.
+    One region: root (default the first of data.processed_dir). static_stats {name: (mean, std)} standardises
+    the static fields with given (pooled multi-region) stats; None = over this region's own sea cells.
     """
 
-    def __init__(self, cfg, years, patch_size=None, crops_per_day=20, stats=None, edge_pixels=0):
-        root = Path(cfg.data.processed_dir)
+    def __init__(self, cfg, years, patch_size=None, crops_per_day=20, stats=None, edge_pixels=0,
+                 root=None, static_stats=None):
+        root = Path(root) if root is not None else processed_dirs(cfg)[0]
+        self.root = root
         self.dir_800m = root / "800m_on_160m_grid"
         self.dir_160m = root / "160m"
         static_dir = root / "static"
@@ -117,7 +206,7 @@ class DownscalingDataset(Dataset):
         self.mean = {v: m for v, (m, s) in stats.items()}
         self.std  = {v: s for v, (m, s) in stats.items()}
 
-        self.static = self._load_static(static_dir, cfg.data.static_inputs)
+        self.static = self._load_static(static_dir, cfg.data.static_inputs, static_stats)
 
 
     def __len__(self):
@@ -150,31 +239,21 @@ class DownscalingDataset(Dataset):
         return np.nan_to_num(arr, nan=0.0).astype(np.float32)
 
     def _find_dates(self, years):
-        ## keep dates for which every input and target file exists
-        years = {str(y) for y in years}
-        dates = []
-        for path in sorted(self.dir_800m.glob(daily_filename(self.input_vars[0], "[0-9]" * 8))):
-            date = path.name[:8]
-            if date[:4] not in years:
-                continue
-            if all((self.dir_800m / daily_filename(v, date)).exists() for v in self.input_vars) and all(
-                (self.dir_160m / daily_filename(v, date)).exists() for v in self.target_vars
-            ):
-                dates.append(date)
-        return dates
+        return find_dates(self.dir_800m, self.dir_160m, self.input_vars, self.target_vars, years)
 
-    def _load_static(self, static_dir, names):
-        ## land_mask is used as 0/1; other static fields are standardised over sea cells.
-        ## distance_to_coast is log1p'd first: the error changes over the first few km, but
-        ## distances reach ~100 km, so plain standardising would squash the coastal range
+    def _load_static(self, static_dir, names, static_stats=None):
+        ## land_mask is used as 0/1; other static fields are standardised over sea cells:
+        ## this region's own, or with the given (multi-region) static_stats
         sea = self.sea_mask.numpy()
         fields = []
         for name in names:
-            arr = np.load(static_dir / f"{name}.npy").astype(np.float32)
-            if name == "distance_to_coast":
-                arr = np.log1p(arr)
+            arr = _static_raw(static_dir, name)
             if name != "land_mask":
-                arr = (arr - arr[sea].mean()) / arr[sea].std()
+                if static_stats is not None:
+                    m, s = static_stats[name]
+                    arr = ((arr - m) / s).astype(np.float32)
+                else:
+                    arr = (arr - arr[sea].mean()) / arr[sea].std()
                 arr[~sea] = 0.0
             fields.append(arr)
         if not fields:
