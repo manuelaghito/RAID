@@ -47,8 +47,9 @@ Use the built-in continuous integration in GitLab.
 
 ## Processed data (data/processed/)
 
-- 800m/, 160m/: daily surface temperature, one file per day (YYYYMMDD_temp.npy)
-- Units: °C, NOT normalized
+- 800m_on_160m_grid/, 160m/: daily surface fields, one file per day and variable (YYYYMMDD_<var>.npy),
+  var = temp, salt, u, v (u/v moved onto the rho points)
+- Units: °C, psu, m/s, NOT normalized
 - 800m files: reprojected to the 160m grid, cropped to the
   NorFjords extent, interpolated (<method>) to 160m resolution
 - Land cells: <NaN / fill value>; land mask in <file>, 1 = sea, 0 = land
@@ -65,19 +66,37 @@ Use the built-in continuous integration in GitLab.
 - `split.folds`: train/val years per CV fold, picked with `--fold` (required by train.py)
 
 ## Edge trimming
-- `train.edge_pixels: N` in the step1 configs (default 0 = no trimming)
-- drops a frame of N cells along each grid edge from the train and val loss,
+- `train.edge_pixels: N` in the step1 configs (default 0 = no trimming; CLI `--train_edge_pixels`)
+- drops a frame of N cells along each grid edge from the **training** loss,
   to keep the 160m model's open-boundary zone from driving training
 - loss mask only: inputs keep the edge cells (model still sees them as context),
   and normalization stats still use all sea cells
 - with random patches, crops overlapping the frame just have fewer loss cells
   (masked_mse averages over the remaining sea cells)
-- evaluation scripts (evaluate.py, evaluate_validation.py, rmse_maps.py) use the
-  untrimmed sea mask, i.e. test metrics are over the full grid
+- the validation loss that picks `best.pt` uses `train.val_edge_pixels` (default 0) instead,
+  so runs with different `edge_pixels` select their checkpoint on the same cells
+- evaluation scores all sea cells by default; `evaluate.py --edge_pixels N` scores the interior only
+  (written to `eval_<split>_trim<N>/`), so runs trained with different `edge_pixels` compare on the same cells
 - implemented by `trim_edges()` in `src/raid/data/dataset.py`
 
+## Comparing runs
+- `train.seed` (CLI `--seed`) fixes model init, crop positions and batch order; the spread between seeds
+  is about as large as the effects tested so far, so compare settings over several seeds
+- keep `train.epochs` identical: the cosine LR schedule is stretched over it, so it changes every epoch's LR
+- train.py writes the resolved config to `<run>/config.yaml` and the settings to the top of `train.log`
+- `--fold full` has no validation and keeps the last epoch; prefer the fold ensemble (`--fold ensemble`)
+- results table over many runs, pooling runs that differ only in `_seed<N>`:
+  `python3 scripts/summarize_runs.py <folder with runs> --eval eval_test_trim10`
+
+## Diagnostics (CPU, from what evaluate.py saved)
+- `scripts/consistency_stats.py`: splits the baseline (and model) error into a large-scale part, where 800m
+  and 160m disagree at scales both resolve, and a small-scale part (sub-800m detail)
+- `scripts/smallscale_stats.py`: does the model reproduce the 160m target's gradients and small-scale
+  variance, and how are they tied to the bathymetry slope (RMSE alone rewards smooth fields)
+- usage lines at the top of each script
+
 ## Metrics
-- RMSE etc. over sea cells only, in °C
+- RMSE etc. over sea cells only, in physical units (°C, psu, m/s)
 - baseline = interpolated 800m vs 160m
 
 
