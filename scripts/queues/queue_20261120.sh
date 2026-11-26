@@ -9,13 +9,13 @@
 ## finished seeds are skipped, so after a crash just start the same thing again.
 ##
 ## usage (from anywhere; uses this worktree's code and the repo venv):
-##   bash scripts/queue_20261120.sh          # start both queues in detached screen sessions raid_gpu0 / raid_gpu1
+##   bash scripts/queues/queue_20261120.sh          # start both queues in detached screen sessions raid_gpu0 / raid_gpu1
 ##   screen -r raid_gpu0                     # watch one (detach again with ctrl-a d)
-##   bash scripts/queue_20261120.sh gpu1     # or run one queue in the foreground (what the screens run)
+##   bash scripts/queues/queue_20261120.sh gpu1     # or run one queue in the foreground (what the screens run)
 ## logs: <O>/queue_20261120_gpu<N>.log
 set -euo pipefail
 
-here="$(cd "$(dirname "$0")/.." && pwd)"
+here="$(cd "$(dirname "$0")/../.." && pwd)"
 VENV=${VENV:-/gpfs/gpfs0/osea/manuel/RAID/.venv}
 O=${O:-/data/prosjekt/15915_RAID/train/step1B}
 
@@ -52,7 +52,7 @@ case "${1:-}" in
                 echo "screen raid_$q already exists, not starting it again"
                 continue
             fi
-            screen -dmS "raid_$q" bash -c "bash '$here/scripts/queue_20261120.sh' $q 2>&1 | tee -a '$O/queue_20261120_$q.log'"
+            screen -dmS "raid_$q" bash -c "bash '$here/scripts/queues/queue_20261120.sh' $q 2>&1 | tee -a '$O/queue_20261120_$q.log'"
             echo "started screen raid_$q (log $O/queue_20261120_$q.log)"
         done
         ;;

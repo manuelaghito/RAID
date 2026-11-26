@@ -107,6 +107,21 @@ Use the built-in continuous integration in GitLab.
 - the run folder is named after all targets (`<output_dir>/u_v/<fold>`); evaluate.py writes one subfolder
   per variable (`eval_test/u/`, `eval_test/v/`), and summarize_runs.py shows one row per variable (`[u]`, `[v]`)
 
+## Training on several regions
+- `data.processed_dir` may be a list of regions (`configs/step1b_unet_uv_regions.yaml`: A04, A03, A05);
+  training draws `train.crops_per_day` crops per day from every region, with the same year split in each,
+  so the test years stay out everywhere
+- normalization stats (also for the static fields) are pooled over all regions' training years and saved
+  in `norm_stats.npz`; validation (picks `best.pt`) and evaluation use the first region
+- `evaluate.py --processed_dir data/processed_A05` scores a model on another region's data, with the
+  normalization of its training regions; results go to `eval_<split>[_trim<N>]_processed_A05/`
+
+## Run tools
+- `scripts/seed_study.sh`: train (folds val2024 + val2025) and evaluate one config for several seeds
+  (`LABEL`, `SEEDS`, `EPOCHS`); `scripts/queues/`: the run queues as launched, by date
+- `scripts/eval_to_netcdf.py`: netCDF of an evaluation for ncview/Panoply, day by day target, baseline,
+  model, errors and monthly RMSE maps, on the region that was scored (`--nk800` adds the raw 800m field)
+
 
 ***
 # Editing this README

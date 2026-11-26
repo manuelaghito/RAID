@@ -5,18 +5,18 @@
 ##   regions_seed<s>  trained on A03+A04+A05 (2023, 2024, 2025) -> reference: the region seen in training
 ##   GPU0 scores on A03, GPU1 on A05; GPU_A03 / GPU_A05 pick other GPUs, e.g. both on GPU 1 (they can share it:
 ##   evaluation is batch 1 without gradients, roughly 2 GB on A03 and 3 GB on A05; check nvidia-smi for free memory):
-##   GPU_A03=1 GPU_A05=1 bash scripts/queue_20261126_crosseval.sh
+##   GPU_A03=1 GPU_A05=1 bash scripts/queues/queue_20261126_crosseval.sh
 ## results: <run>/u_v/<fold>/eval_test_trim10_processed_A0x (ensemble: <run>/u_v/ensemble/...); runs already scored
 ## are skipped, so after a crash just start it again. Table:
 ##   python3 scripts/summarize_runs.py <O>/u_v/20261120_regions --eval eval_test_trim10_processed_A03
 ##
 ## usage (from anywhere; uses this worktree's code and the repo venv):
-##   bash scripts/queue_20261126_crosseval.sh          # start both queues in detached screens raid_xeval_gpu0 / _gpu1
-##   bash scripts/queue_20261126_crosseval.sh gpu1     # or run one queue in the foreground
+##   bash scripts/queues/queue_20261126_crosseval.sh          # start both queues in detached screens raid_xeval_gpu0 / _gpu1
+##   bash scripts/queues/queue_20261126_crosseval.sh gpu1     # or run one queue in the foreground
 ## logs: <O>/queue_20261126_crosseval_gpu<N>.log
 set -euo pipefail
 
-here="$(cd "$(dirname "$0")/.." && pwd)"
+here="$(cd "$(dirname "$0")/../.." && pwd)"
 VENV=${VENV:-/gpfs/gpfs0/osea/manuel/RAID/.venv}
 O=${O:-/data/prosjekt/15915_RAID/train/step1B}
 D=${D:-/data/prosjekt/15915_RAID/data}
@@ -61,7 +61,7 @@ case "${1:-}" in
                 echo "screen raid_xeval_$q already exists, not starting it again"
                 continue
             fi
-            screen -dmS "raid_xeval_$q" bash -c "bash '$here/scripts/queue_20261126_crosseval.sh' $q 2>&1 | tee -a '$O/queue_20261126_crosseval_$q.log'"
+            screen -dmS "raid_xeval_$q" bash -c "bash '$here/scripts/queues/queue_20261126_crosseval.sh' $q 2>&1 | tee -a '$O/queue_20261126_crosseval_$q.log'"
             echo "started screen raid_xeval_$q (log $O/queue_20261126_crosseval_$q.log)"
         done
         ;;
