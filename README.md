@@ -116,6 +116,15 @@ Use the built-in continuous integration in GitLab.
 - `evaluate.py --processed_dir data/processed_A05` scores a model on another region's data, with the
   normalization of its training regions; results go to `eval_<split>[_trim<N>]_processed_A05/`
 
+## Training on the predictable part only (target_adj)
+- NorKyst and NorFjords are separate simulations: their eddies drift apart, and that large-scale mismatch
+  (about 85 % of the interpolation error) cannot be predicted from the 800m input
+- `scripts/make_target_adj.py` writes `<processed_dir>/160m_adj/`: target − (L − L̄), with L = S(target) − S(input)
+  the day's large-scale mismatch (S = smoothing over sea, σ = 1.6 km) and L̄ its per-cell mean over the training
+  years (the systematic, predictable part, kept)
+- train with `data.target_dir: 160m_adj` (`configs/step1b_unet_uv_adj.yaml`); `evaluate.py --target_dir 160m`
+  scores against the real target as well (`eval_<split>..._target160m/`)
+
 ## Run tools
 - `scripts/seed_study.sh`: train (folds val2024 + val2025) and evaluate one config for several seeds
   (`LABEL`, `SEEDS`, `EPOCHS`); `scripts/queues/`: the run queues as launched, by date

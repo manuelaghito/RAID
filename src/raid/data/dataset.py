@@ -40,6 +40,15 @@ def processed_dirs(cfg):
     return [Path(x) for x in ([d] if isinstance(d, (str, Path)) else d)]
 
 
+def target_dir_name(cfg):
+    """data.target_dir: folder under each processed_dir holding the 160m targets (default "160m").
+
+    e.g. "160m_adj" (scripts/make_target_adj.py): the 160m target with the day's large-scale mismatch to the
+    800m input removed, so the loss is not driven by eddies the input cannot know about.
+    """
+    return getattr(cfg.data, "target_dir", None) or "160m"
+
+
 def build_dataloaders(cfg):
     ## normalisation stats come from this fold's training years only; val reuses them
     ## no val years (--fold full) -> val_loader is None
@@ -63,11 +72,11 @@ def build_dataloaders(cfg):
         iv, tv = cfg.data.input_vars, cfg.data.target_vars
         regions = []
         for root in roots:
-            dates = find_dates(root / "800m_on_160m_grid", root / "160m", iv, tv, cfg.split.train.years)
+            dates = find_dates(root / "800m_on_160m_grid", root / target_dir_name(cfg), iv, tv, cfg.split.train.years)
             if not dates:
                 raise RuntimeError(f"no preprocessed samples in {root} for years {cfg.split.train.years}")
             sea = torch.from_numpy(np.load(root / "static" / "land_mask.npy").astype(bool))
-            regions.append((dates, root / "800m_on_160m_grid", root / "160m", sea))
+            regions.append((dates, root / "800m_on_160m_grid", root / target_dir_name(cfg), sea))
         stats = compute_stats_pooled(regions, iv, tv)
         static_stats = compute_static_stats(roots, cfg.data.static_inputs)
         parts = [DownscalingDataset(cfg=cfg, years=cfg.split.train.years, patch_size=patch_size,
@@ -184,7 +193,7 @@ class DownscalingDataset(Dataset):
         root = Path(root) if root is not None else processed_dirs(cfg)[0]
         self.root = root
         self.dir_800m = root / "800m_on_160m_grid"
-        self.dir_160m = root / "160m"
+        self.dir_160m = root / target_dir_name(cfg)
         static_dir = root / "static"
         self.patch_size = patch_size
         self.crops_per_day = crops_per_day
