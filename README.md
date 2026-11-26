@@ -54,6 +54,17 @@ Use the built-in continuous integration in GitLab.
   NorFjords extent, interpolated (<method>) to 160m resolution
 - Land cells: <NaN / fill value>; land mask in <file>, 1 = sea, 0 = land
 
+## Other NorFjords regions (data/processed_<region>/)
+- A04 is `data/processed/` (`configs/base.yaml`); every other region has `configs/base_<region>.yaml`
+  (A01..A13) with its own 160m path, `reference_file` (grid, static fields) and `processed_dir`
+- each region has its own 160m grid and projection offsets, read from the file's `grid_mapping`;
+  the regions overlap (e.g. about half of A03's sea cells lie inside A04)
+- `scripts/preprocess.py --years` splits the work per year; `scripts/preprocess_regions.sh` runs many
+  regions and years side by side in a screen session (4 threads per job)
+- each run appends its command, git commit, method and paths to `<processed_dir>/preprocess_provenance.txt`
+- `data/processed/800m_on_160m_grid/*_salt.npy` were remade with cubic interpolation (2026-11-20); the
+  earlier linear ones are in `data/processed/archive_salt_linear_20261021/`
+
 ## Normalization
 - mean/std stored in <file>.npz (keys: <mean, std>)
 - computed from sea cells in the training period only
