@@ -129,67 +129,82 @@ def main():
                for _, ds, _ in members]
     ds = members[0][1]     # dates, sea mask and file dirs are the same for every member
 
-    var, in_var = cfg.data.target_vars[0], cfg.data.input_vars[0]
+    ## one model output per target variable; output k is the correction to input channel k (same variable),
+    ## so the bicubic baseline for target k is input_vars[k]. With several targets each variable gets its
+    ## own subfolder <out>/<var>/ holding the same files a single-variable evaluation writes to <out>/
+    targets = list(cfg.data.target_vars)
+    dests = {v: (out / v if len(targets) > 1 else out) for v in targets}
     ## copy, not a view: starting the DataLoader workers (forkserver, the default from python 3.14) moves the
     ## dataset's tensors into shared memory, which would leave a .numpy() view pointing at freed memory
     sea = ds.sea_mask.numpy().copy()
     T, (H, W) = len(ds), sea.shape
     ## cells that are scored: all sea cells, or the interior with --edge_pixels
     scored = trim_edges(sea, args.edge_pixels)
-    ## (T, H, W) physical units, land = NaN; written day by day so the whole array never sits in RAM
-    pred_all = np.lib.format.open_memmap(out / f"pred_{var}.npy", mode="w+", dtype=np.float32, shape=(T, H, W))
-    ## per day: rmse_model, rmse_baseline, bias_model, bias_baseline (bias = pred - target)
-    daily = np.zeros((T, 4), np.float32)
-    sq_model, sq_base, bias_sum = (np.zeros((H, W)) for _ in range(3))
+    acc = {}
+    for v, d in dests.items():
+        d.mkdir(parents=True, exist_ok=True)
+        acc[v] = dict(
+            ## (T, H, W) physical units, land = NaN; written day by day so the whole array never sits in RAM
+            pred=np.lib.format.open_memmap(d / f"pred_{v}.npy", mode="w+", dtype=np.float32, shape=(T, H, W)),
+            ## per day: rmse_model, rmse_baseline, bias_model, bias_baseline (bias = pred - target)
+            daily=np.zeros((T, 4), np.float32),
+            sq_model=np.zeros((H, W)), sq_base=np.zeros((H, W)), bias_sum=np.zeros((H, W)))
 
     with torch.no_grad():
         for i, batches in enumerate(zip(*loaders)):
-            ## ensemble = mean of the members' predictions in physical units (a single run is a 1-member ensemble)
-            p = np.mean([denormalize(model(x.to(device))[0, 0].cpu().numpy(), *st[var])
-                         for (model, _, st), (x, _, _) in zip(members, batches)], axis=0)
-            ## target and bicubic baseline straight from the physical-unit files, not via the normalised x/y:
-            ## the dataset fills NaN with 0 after normalising, which would turn them into the fold's mean
+            outs = [model(x.to(device))[0].cpu().numpy() for (model, _, _), (x, _, _) in zip(members, batches)]
             date = ds.dates[i]
-            t = np.load(ds.dir_160m / daily_filename(var, date))
-            b = np.load(ds.dir_800m / daily_filename(in_var, date))
-            n_t, n_b = np.isnan(t[sea]).sum(), np.isnan(b[sea]).sum()
-            if n_t or n_b:
-                raise ValueError(f"{date}: NaN on sea cells, target {n_t}, baseline input {n_b}")
-            pred_all[i] = np.where(sea, p, np.nan)
-            daily[i] = (masked_rmse(p, t, scored), masked_rmse(b, t, scored),
-                        masked_bias(p, t, scored), masked_bias(b, t, scored))
-            sq_model += (p - t) ** 2
-            sq_base += (b - t) ** 2
-            bias_sum += p - t
-    pred_all.flush()
+            for k, v in enumerate(targets):
+                a = acc[v]
+                ## ensemble = mean of the members' predictions in physical units (a single run is a 1-member ensemble)
+                p = np.mean([denormalize(o[k], *st[v]) for o, (_, _, st) in zip(outs, members)], axis=0)
+                ## target and bicubic baseline straight from the physical-unit files, not via the normalised x/y:
+                ## the dataset fills NaN with 0 after normalising, which would turn them into the fold's mean
+                t = np.load(ds.dir_160m / daily_filename(v, date))
+                b = np.load(ds.dir_800m / daily_filename(cfg.data.input_vars[k], date))
+                n_t, n_b = np.isnan(t[sea]).sum(), np.isnan(b[sea]).sum()
+                if n_t or n_b:
+                    raise ValueError(f"{date} {v}: NaN on sea cells, target {n_t}, baseline input {n_b}")
+                a["pred"][i] = np.where(sea, p, np.nan)
+                a["daily"][i] = (masked_rmse(p, t, scored), masked_rmse(b, t, scored),
+                                 masked_bias(p, t, scored), masked_bias(b, t, scored))
+                a["sq_model"] += (p - t) ** 2
+                a["sq_base"] += (b - t) ** 2
+                a["bias_sum"] += p - t
 
-    land = lambda a: np.where(scored, a, np.nan).astype(np.float32)
-    np.save(out / "dates.npy", np.array(ds.dates))                       # (T,) 'YYYYMMDD'
-    np.save(out / "daily_metrics.npy", daily)                            # (T, 4), columns above
-    np.save(out / f"rmse_map_model_{var}.npy", land(np.sqrt(sq_model / T)))
-    np.save(out / f"rmse_map_baseline_{var}.npy", land(np.sqrt(sq_base / T)))
-    np.save(out / f"bias_map_model_{var}.npy", land(bias_sum / T))
-
-    ## same sea mask every day, so the overall RMSE is the root of the mean daily MSE
-    rmse_m, rmse_b = np.sqrt((daily[:, :2] ** 2).mean(0))
+    land = lambda arr: np.where(scored, arr, np.nan).astype(np.float32)
     print(f"{args.split}{f' (fold {args.fold})' if args.fold else ''}: {T} days ({ds.dates[0]} -> {ds.dates[-1]}), "
           f"run{'s' if ensemble else ''} {', '.join(map(str, run_dirs))}")
     if args.edge_pixels > 0:
         print(f"  interior only: {args.edge_pixels} edge cells left out, {scored.sum()} of {sea.sum()} sea cells scored")
-    unit = UNITS.get(var, "")
-    print(f"  model    RMSE {rmse_m:.4f} {unit}  bias {daily[:, 2].mean():+.4f}")
-    print(f"  baseline RMSE {rmse_b:.4f} {unit}  bias {daily[:, 3].mean():+.4f}")
-    print(f"  skill vs baseline: {1 - rmse_m / rmse_b:+.1%}")
+    for v, d in dests.items():
+        a = acc[v]
+        a["pred"].flush()
+        daily = a["daily"]
+        np.save(d / "dates.npy", np.array(ds.dates))                         # (T,) 'YYYYMMDD'
+        np.save(d / "daily_metrics.npy", daily)                              # (T, 4), columns above
+        np.save(d / f"rmse_map_model_{v}.npy", land(np.sqrt(a["sq_model"] / T)))
+        np.save(d / f"rmse_map_baseline_{v}.npy", land(np.sqrt(a["sq_base"] / T)))
+        np.save(d / f"bias_map_model_{v}.npy", land(a["bias_sum"] / T))
 
-    monthly = monthly_metrics(ds.dates, daily)
-    with open(out / "monthly_metrics.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(monthly[0]))
-        w.writeheader()
-        w.writerows({k: f"{v:.6f}" if isinstance(v, float) else v for k, v in r.items()} for r in monthly)
-    print(f"\n  {'month':<8} {'days':>4}  {'RMSE model':>10} {'baseline':>9}  {'bias model':>10} {'baseline':>9}  {'skill':>6}")
-    for r in monthly:
-        print(f"  {r['month']:<8} {r['n_days']:>4}  {r['rmse_model']:>10.4f} {r['rmse_baseline']:>9.4f}  "
-              f"{r['bias_model']:>+10.4f} {r['bias_baseline']:>+9.4f}  {r['skill']:>+6.1%}")
+        ## same sea mask every day, so the overall RMSE is the root of the mean daily MSE
+        rmse_m, rmse_b = np.sqrt((daily[:, :2] ** 2).mean(0))
+        unit = UNITS.get(v, "")
+        if len(targets) > 1:
+            print(f"\n  [{v}]")
+        print(f"  model    RMSE {rmse_m:.4f} {unit}  bias {daily[:, 2].mean():+.4f}")
+        print(f"  baseline RMSE {rmse_b:.4f} {unit}  bias {daily[:, 3].mean():+.4f}")
+        print(f"  skill vs baseline: {1 - rmse_m / rmse_b:+.1%}")
+
+        monthly = monthly_metrics(ds.dates, daily)
+        with open(d / "monthly_metrics.csv", "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(monthly[0]))
+            w.writeheader()
+            w.writerows({k: f"{x:.6f}" if isinstance(x, float) else x for k, x in r.items()} for r in monthly)
+        print(f"\n  {'month':<8} {'days':>4}  {'RMSE model':>10} {'baseline':>9}  {'bias model':>10} {'baseline':>9}  {'skill':>6}")
+        for r in monthly:
+            print(f"  {r['month']:<8} {r['n_days']:>4}  {r['rmse_model']:>10.4f} {r['rmse_baseline']:>9.4f}  "
+                  f"{r['bias_model']:>+10.4f} {r['bias_baseline']:>+9.4f}  {r['skill']:>+6.1%}")
     print(f"saved to {out}")
 
 

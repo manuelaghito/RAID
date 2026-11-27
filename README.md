@@ -99,6 +99,14 @@ Use the built-in continuous integration in GitLab.
 - RMSE etc. over sea cells only, in physical units (°C, psu, m/s)
 - baseline = interpolated 800m vs 160m
 
+## Several target variables in one model (e.g. u and v)
+- `data.target_vars: [u, v]` with `data.input_vars` starting with the same variables
+  (`configs/step1b_unet_uv.yaml`): one model output per target variable, each a correction to the
+  interpolated input of that variable
+- the loss is the masked MSE over all outputs; each variable is normalized, so they weigh equally
+- the run folder is named after all targets (`<output_dir>/u_v/<fold>`); evaluate.py writes one subfolder
+  per variable (`eval_test/u/`, `eval_test/v/`), and summarize_runs.py shows one row per variable (`[u]`, `[v]`)
+
 
 ***
 # Editing this README

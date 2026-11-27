@@ -12,15 +12,16 @@ def conv_block(c_in, c_out):
 
 
 class UNet(nn.Module):
-    def __init__(self, in_channels: int = 4, base_channels: int = 32, depth: int = 3):
+    def __init__(self, in_channels: int = 4, base_channels: int = 32, depth: int = 3, out_channels: int = 1):
         super().__init__()
         self.depth = depth
+        self.out_channels = out_channels
         chs = [base_channels * 2**i for i in range(depth + 1)]           # 32, 64, 128, 256
         ## enc[0] at full resolution, enc[depth] is the bottleneck
         self.enc = nn.ModuleList([conv_block(in_channels, chs[0])] +
                                  [conv_block(chs[i], chs[i + 1]) for i in range(depth)])
         self.dec = nn.ModuleList([conv_block(chs[i + 1] + chs[i], chs[i]) for i in reversed(range(depth))])
-        self.output_conv = nn.Conv2d(chs[0], 1, kernel_size=1)
+        self.output_conv = nn.Conv2d(chs[0], out_channels, kernel_size=1)
 
         # Start exactly at the bicubic baseline: the correction is zero at init.
         nn.init.zeros_(self.output_conv.weight)
@@ -43,6 +44,7 @@ class UNet(nn.Module):
             h = F.interpolate(h, scale_factor=2, mode="bilinear", align_corners=False)
             h = block(torch.cat([h, skips.pop()], dim=1))
 
-        return x[:, :1] + self.output_conv(h)[..., :H, :W]
+        ## output k = interpolated input channel k + correction (inputs start with the target variables)
+        return x[:, :self.out_channels] + self.output_conv(h)[..., :H, :W]
 
 
