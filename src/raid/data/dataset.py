@@ -34,11 +34,19 @@ def trim_edges(mask, n):
 def build_dataloaders(cfg):
     ## normalisation stats come from this fold's training years only; val reuses them
     ## no val years (--fold full) -> val_loader is None
-    ## train.edge_pixels (default 0) drops that many cells along each grid edge from train and val loss
+    ## train.edge_pixels (default 0) drops that many cells along each grid edge from the TRAINING loss.
+    ## train.val_edge_pixels (default 0) does the same for the VALIDATION loss, which picks best.pt;
+    ## kept separate so runs with different edge_pixels still choose their checkpoint on the same cells
     edge_pixels = getattr(cfg.train, "edge_pixels", 0)
+    val_edge_pixels = getattr(cfg.train, "val_edge_pixels", 0)
     train_dataset = DownscalingDataset(cfg=cfg, years=cfg.split.train.years,
                                        patch_size=getattr(cfg.train, "patch_size", None),
                                        edge_pixels=edge_pixels)
+
+    ## train.seed fixes the shuffle order and, through the per-worker seeds drawn from this
+    ## generator, the random crops; None leaves both random
+    seed = getattr(cfg.train, "seed", None)
+    generator = torch.Generator().manual_seed(seed) if seed is not None else None
 
     out = Path(cfg.output_dir); out.mkdir(parents=True, exist_ok=True)
     np.savez(out / "norm_stats.npz",
@@ -46,12 +54,12 @@ def build_dataloaders(cfg):
              **{f"{v}_std":  s for v, (m, s) in train_dataset.stats.items()})
 
     train_loader = DataLoader(train_dataset, batch_size=cfg.train.batch_size, shuffle=True,
-                              num_workers=cfg.train.num_workers, pin_memory=True)
+                              num_workers=cfg.train.num_workers, pin_memory=True, generator=generator)
     if not cfg.split.val.years:
         return train_loader, None
     ## validate on the full grid (deterministic, comparable across epochs); full grids only fit batch 1
     val_dataset = DownscalingDataset(cfg=cfg, years=cfg.split.val.years, stats=train_dataset.stats,
-                                     edge_pixels=edge_pixels)
+                                     edge_pixels=val_edge_pixels)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False,
                             num_workers=cfg.train.num_workers, pin_memory=True)
 

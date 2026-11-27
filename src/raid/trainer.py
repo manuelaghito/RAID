@@ -1,6 +1,23 @@
+import random
+
+import numpy as np
 import torch
 from pathlib import Path
 from raid.losses import masked_mse
+
+
+def seed_everything(seed):
+    """Seed python, numpy and torch (CPU + all GPUs) so model init is repeatable.
+
+    The crops and shuffle order are seeded separately through the DataLoader generator
+    (build_dataloaders). cuDNN is set to deterministic algorithms; a few GPU kernels
+    (e.g. some upsampling backward passes) can still differ in the last bits between runs.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
 def train_one_epoch(model, loader, optimizer, device):
     model.train()

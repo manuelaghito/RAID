@@ -18,6 +18,7 @@ import yaml
 from matplotlib.colors import LinearSegmentedColormap
 
 from raid.config import var_dir
+from raid.metrics import UNITS
 
 ## sequential ramp for RMSE (same as error_map.py), diverging blue/red for the change; land in neutral gray
 BLUE_RAMP = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
@@ -28,7 +29,6 @@ CMAP.set_bad(LAND)
 DIFF_CMAP = LinearSegmentedColormap.from_list("diff", DIVERGING)
 DIFF_CMAP.set_bad(LAND)
 INK, MUTED = "#1f1f1d", "#6b6a66"
-UNITS = {"temp": "degC", "salt": "psu"}
 
 
 def domain_rmse(rmse_map, sea):

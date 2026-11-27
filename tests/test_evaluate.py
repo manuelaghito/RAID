@@ -134,3 +134,29 @@ def test_evaluate_output_dir_overrides_config_for_fold_and_ensemble(tmp_path):
     assert (elsewhere / "temp" / "val2025" / "eval_test" / "dates.npy").exists()
     assert (elsewhere / "temp" / "ensemble" / "eval_test" / "dates.npy").exists()
     assert not (tmp_path / "run").exists()
+
+
+def test_evaluate_edge_pixels_scores_interior_only(tmp_path):
+    ## a model that is wrong only along the grid edge: with --edge_pixels the interior is scored, where it is perfect
+    run = tmp_path / "run"
+    cfg_path, land = make_fake_setup(tmp_path, DATES, run)
+    root = tmp_path / "processed"
+    n = 3
+    for d in DATES:
+        t = np.load(root / "160m" / daily_filename("temp", d))
+        b = t.copy()
+        b[:n, :] += 1.0; b[-n:, :] += 1.0; b[:, :n] += 1.0; b[:, -n:] += 1.0
+        np.save(root / "800m_on_160m_grid" / daily_filename("temp", d), b)
+
+    run_evaluate("--config", cfg_path)
+    run_evaluate("--config", cfg_path, "--edge_pixels", n)
+
+    full = np.load(run / "eval_test" / "daily_metrics.npy")
+    inner = np.load(run / f"eval_test_trim{n}" / "daily_metrics.npy")
+    assert (full[:, :2] > 0.1).all()                              # edge errors count on the full domain
+    np.testing.assert_allclose(inner[:, :2], 0, atol=1e-5)        # untrained model = baseline = target inside
+    rmse_map = np.load(run / f"eval_test_trim{n}" / "rmse_map_model_temp.npy")
+    assert np.isnan(rmse_map[:n]).all() and np.isnan(rmse_map[:, -n:]).all()
+    assert np.isfinite(rmse_map[n:-n, n:-n][land[n:-n, n:-n] == 1]).all()
+    pred = np.load(run / f"eval_test_trim{n}" / "pred_temp.npy")
+    assert np.isfinite(pred[:, land == 1]).all()                  # predictions still cover every sea cell
