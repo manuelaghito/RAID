@@ -1,0 +1,22 @@
+## preprocessing config: python3 scripts/preprocess.py --config configs/base.yaml
+## NorFjords region A05_v3 (A04 is configs/base.yaml): own 160m grid, reference_file and processed_dir
+## training/evaluation use configs/step1*.yaml
+data:
+  raw_800m:
+    path: /data/osea/s3-osea/Norkyst/avg
+    location_name: norkyst
+    resolution_tag: 800m
+  raw_160m:
+    path: /data/osea/s3-osea/Norfjords/A05_v3/avg
+    reference_file: /data/osea/s3-osea/Norfjords/A05_v3/avg/2025/norfjords_160m_avg.nc4_2025010112
+    location_name: norfjords
+    resolution_tag: 160m
+
+  processed_dir: /data/prosjekt/15915_RAID/data/processed_A05/
+
+  input_vars: [temp, salt, u, v]                   # from 800m, reprojected onto the 160m grid
+  target_vars: [temp, salt, u, v]                  # from 160m
+  static_inputs: [bathymetry, land_mask, distance_to_coast]
+
+  ## optional vertical level index into s_rho / s_w, e.g. levels: {temp: -1}
+  ## variables not listed default to -1 (surface)

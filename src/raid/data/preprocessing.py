@@ -4,12 +4,15 @@ import xarray as xr
 from scipy import ndimage
 
 
+## fallback projection offsets for files without a grid_mapping variable (the 160m values are A04's;
+## every NorFjords region has its own, so other regions must take them from their own reference file)
 GRID_PARAMS = {
     "800m": {"false_easting": 3369600, "false_northing": 1844800},
     "160m": {"false_easting": 3016640, "false_northing": 1438720},
 }
 
 
+## default reference files (A04); preprocess.py overrides them per region via data.raw_*.reference_file
 REFERENCE_FILE_160M = "/data/osea/s3-osea/Norfjords/A04_v3/avg/2025/norfjords_160m_avg.nc4_2025010112"
 REFERENCE_FILE_800M = "/data/osea/s3-osea/Norkyst/avg/2025/norkyst_800m_avg.nc4_2025010112"
 
@@ -29,17 +32,20 @@ STATIC_FIELDS = {
 }
 
 
-def save_static_fields(out_dir, names):
-    ## static fields are time-invariant, so take them from the reference grid.
+def save_static_fields(out_dir, names, reference_file=None):
+    ## static fields are time-invariant, so take them from the (region's) reference grid.
     ## land_mask is always saved: the dataset needs it for the loss mask
-    ds = xr.open_dataset(REFERENCE_FILE_160M)
+    ds = xr.open_dataset(reference_file or REFERENCE_FILE_160M)
     for name in dict.fromkeys(["land_mask", *names]):
         get, dtype = STATIC_FIELDS[name]
         np.save(out_dir / f"{name}.npy", get(ds).astype(dtype))
 
 
 def get_true_coords(ds, res):
-    p = GRID_PARAMS[res]
+    ## projection offsets from the file's own grid_mapping (copied from the reference file for old files
+    ## by set_rho_variables); GRID_PARAMS only if neither has one
+    gm = ds["grid_mapping"].attrs if "grid_mapping" in ds.variables else {}
+    p = gm if "false_easting" in gm and "false_northing" in gm else GRID_PARAMS[res]
     x = ds["xi_rho"].values - p["false_easting"]
     y = ds["eta_rho"].values - p["false_northing"]
     return x, y
@@ -102,15 +108,21 @@ def reproject_800m_to_160m(ds_800m, ds_160m, name, level=-1, method="cubic", mar
     out = out.where(ds_160m["mask_rho"].values == 1)
     return out.values.astype(np.float32)
 
-def set_rho_variables(ds, res):
-    ## xi_rho and eta_rho are missing in the older data.
-    ## set from the reference data
+def set_rho_variables(ds, res, reference_file=None):
+    ## xi_rho and eta_rho (and grid_mapping) are missing in the older data: set from the reference file,
+    ## which must be on the same grid (same region for 160m)
     if res == "800m":
-        ref_ds = xr.open_dataset(REFERENCE_FILE_800M)
+        ref_ds = xr.open_dataset(reference_file or REFERENCE_FILE_800M)
     elif res == "160m":
-        ref_ds = xr.open_dataset(REFERENCE_FILE_160M)
+        ref_ds = xr.open_dataset(reference_file or REFERENCE_FILE_160M)
     else:
         return ds
+    for dim in ("eta_rho", "xi_rho"):
+        if ds.sizes[dim] != ref_ds.sizes[dim]:
+            raise ValueError(f"{res}: {dim} size {ds.sizes[dim]} != reference {ref_ds.sizes[dim]} "
+                             f"({reference_file}); wrong region reference file?")
     ds["xi_rho"] = ref_ds["xi_rho"]
     ds["eta_rho"] = ref_ds["eta_rho"]
+    if "grid_mapping" not in ds.variables and "grid_mapping" in ref_ds.variables:
+        ds["grid_mapping"] = ref_ds["grid_mapping"]
     return ds
