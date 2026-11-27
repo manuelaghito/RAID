@@ -113,6 +113,9 @@ def main():
     parser.add_argument("--processed_dir", type=str, default=None,
                         help="score this region's preprocessed data instead of the first data.processed_dir; "
                              "results go to eval_<split>[_trim<N>]_<folder name>")
+    parser.add_argument("--target_dir", type=str, default=None,
+                        help="score against this target folder instead of data.target_dir, e.g. 160m for a model "
+                             "trained on 160m_adj; results go to eval_<split>[_trim<N>][_<region>]_target<folder>")
     args = parser.parse_args()
     suffix = f"_trim{args.edge_pixels}" if args.edge_pixels > 0 else ""
 
@@ -129,6 +132,9 @@ def main():
         ## a single-region run standardised its static fields over its own region's sea cells
         if len(train_roots) == 1 and eval_root.resolve() != train_roots[0].resolve():
             fallback_static = compute_static_stats(train_roots, raw["data"]["static_inputs"])
+    if args.target_dir is not None:
+        suffix += f"_target{args.target_dir}"
+        raw["data"]["target_dir"] = args.target_dir
     ensemble = args.fold == "ensemble"
     if ensemble:
         ## each fold model was trained on the other folds' val years, so only the test split is unseen by all

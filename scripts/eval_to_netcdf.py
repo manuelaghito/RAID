@@ -11,6 +11,7 @@
 ## its grid (lon/lat, projection offsets for --nk800) from the 160m reference file in <root>/preprocess_provenance.txt;
 ## --processed_dir / --reference_file override them, e.g. an A04 model scored on A05:
 #python3 scripts/eval_to_netcdf.py --config configs/step1b_unet_uv.yaml --eval_dir <run>/u_v/ensemble/eval_test_trim10_processed_A05 --start 20260301 --end 20260331
+## --also_target 160m_adj adds another target folder of the region (e.g. target_adj) as field target_160m_adj
 ## --nk800 adds the raw 800m NorKyst field before interpolation (read from data.raw_800m), each 800m cell copied
 ## onto the 5x5 160m cells it covers: blocky, no smoothing, NaN exactly where 800m is land (the 160m land mask
 ## is not applied, so the 800m coastline shows as it is)
@@ -167,6 +168,12 @@ def write_var(args, cfg, var, in_var, ev, root, ref_file, out):
 
     daily = ("time", "eta_rho", "xi_rho")
     v_t = field("target_160m", daily, f"160m NorFjords {var} (truth for training)")
+    extra = []
+    for sub in args.also_target or []:
+        if not (root / sub / daily_filename(var, days[0])).exists():
+            raise SystemExit(f"--also_target {sub}: no {root / sub / daily_filename(var, days[0])}")
+        extra.append((sub, field(f"target_{sub}", daily, f"{var} from {root / sub} (e.g. 160m_adj: the 160m target "
+                                                           f"without the day's large-scale mismatch to the input)")))
     if args.nk800:
         v_n = field("nk800", daily, f"raw 800m NorKyst {in_var} before interpolation, nearest 800m cell "
                                      f"(NaN = 800m land; not masked with the 160m coast)")
@@ -194,6 +201,8 @@ def write_var(args, cfg, var, in_var, ev, root, ref_file, out):
         p = np.asarray(pred[i], dtype=np.float32)
         em, eb = p - tg, b - tg
         v_t[j], v_b[j], v_p[j] = land(tg), land(b), land(p)
+        for sub, v_x in extra:
+            v_x[j] = land(np.load(root / sub / daily_filename(var, d)))
         if args.nk800:
             v_n[j] = nk800_on_160m(raw_800m[d], in_var, level, x_tgt, y_tgt)      # 800m land mask only
         v_c[j], v_em[j], v_eb[j] = land(p - b), land(em), land(eb)
@@ -235,6 +244,8 @@ def main():
                         help="region the eval dir scored (default: from its evaluate.log)")
     parser.add_argument("--reference_file", type=str, default=None,
                         help="that region's 160m grid file (default: from its preprocess_provenance.txt)")
+    parser.add_argument("--also_target", nargs="+", default=None,
+                        help="also write these target folders of the region as fields, e.g. 160m_adj")
     parser.add_argument("--nk800", action="store_true",
                         help="also write the raw 800m input before interpolation (reads the raw NorKyst files)")
     args = parser.parse_args()
