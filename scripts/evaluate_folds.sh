@@ -7,6 +7,8 @@
 ## extra arguments are passed to every evaluate.py run, e.g. --output_dir (not --run_dir):
 ## CUDA_VISIBLE_DEVICES=1 bash scripts/evaluate_folds.sh configs/step1b_unet.yaml
 ## CUDA_VISIBLE_DEVICES=1 bash scripts/evaluate_folds.sh configs/step1b_unet.yaml --output_dir /some/where
+## FOLDS as in train_folds.sh: the full model is only evaluated if "full" is in it; the ensemble always uses
+## the config's split.folds
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
@@ -16,8 +18,9 @@ fi
 config=$1
 shift
 evaluate="$(dirname "$0")/evaluate.py"
+FOLDS=${FOLDS:-"val2024 val2025 full"}
 
-for fold in val2024 val2025; do
+for fold in $(echo $FOLDS | tr ' ' '\n' | grep -vx full); do
     for split in val test; do
         echo "=== fold $fold, split $split ==="
         python3 "$evaluate" --config "$config" --fold "$fold" --split "$split" "$@"
@@ -27,5 +30,7 @@ done
 echo "=== ensemble, split test ==="
 python3 "$evaluate" --config "$config" --fold ensemble "$@"
 
-echo "=== full, split test ==="
-python3 "$evaluate" --config "$config" --fold full "$@"
+if [[ " $FOLDS " == *" full "* ]]; then
+    echo "=== full, split test ==="
+    python3 "$evaluate" --config "$config" --fold full "$@"
+fi

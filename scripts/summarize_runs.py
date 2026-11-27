@@ -38,7 +38,8 @@ def read_settings(model_dir):
 
 def collect(root, only_eval=None):
     rows = []
-    for f in sorted(root.rglob("daily_metrics.npy")):
+    ## follow symlinked run folders (e.g. a04_seed0/u_v -> an earlier run reused in a seed study)
+    for f in sorted(root.rglob("daily_metrics.npy", recurse_symlinks=True)):
         eval_dir = f.parent
         ## a run with several target variables has one subfolder per variable: eval_test/<var>/
         var = None
